@@ -66,98 +66,159 @@ st.markdown(
 # -------------------------
 def inject_popup(day: int, title: str, url: str, note: str):
     """
-    Injects a floating overlay into the parent.document via a tiny iframe (components.html).
-    Strings are JSON-encoded to avoid JS/Python interpolation issues (dollar signs, quotes, etc.).
+    Robust inject_popup:
+    - versucht parent.frameElement auf position:fixed zu setzen (damit iframe das Viewport-overlay wird; keine Lücke)
+    - wenn parent.frameElement nicht zugreifbar, versucht parent.document injection (alt)
+    - falls beides nicht geht -> fallback: overlay inside iframe und iframe bleibt sichtbar (größere height)
     """
+    import json
     js_title = json.dumps(title)
     js_note = json.dumps(note if note else "Keine Zusatzinfo.")
     js_url = json.dumps(url)
 
-    # Note: use double braces {{ }} in f-string to emit literal { } for JS template literals like `${...}`
     js = f"""
     <script>
     (function() {{
+        const titleVar = {js_title};
+        const noteVar  = {js_note};
+        const urlVar   = {js_url};
+
+        const htmlContent = `
+            <div id="st_popup_box" style="
+                background:white;color:#111;padding:20px;border-radius:12px;
+                max-width:640px;width:90%;box-shadow:0 12px 36px rgba(0,0,0,0.35);text-align:center;">
+                <h3 style="margin:0 0 8px 0;">Tür {day} — ${{titleVar}}</h3>
+                <div style="color:#333;margin-bottom:14px;">${{noteVar}}</div>
+                <div style="display:flex;gap:12px;justify-content:center;margin-top:8px;">
+                    <a href="${{urlVar}}" target="_blank" rel="noopener noreferrer"
+                       style="text-decoration:none;padding:10px 16px;border-radius:8px;background:#2b6cb0;color:white;font-weight:700;">
+                       Song öffnen
+                    </a>
+                    <button id="st_popup_close" style="padding:10px 16px;border-radius:8px;background:#eee;border:1px solid #bbb;font-weight:600;cursor:pointer;">
+                       Schließen
+                    </button>
+                </div>
+            </div>`;
+
+        // helper to create overlay inside a given document (doc)
+        function createOverlayInDoc(doc, useWrapper=false) {{
+            try {{
+                // remove existing
+                const old = doc.getElementById('st_popup_overlay');
+                if (old) old.remove();
+
+                const overlay = doc.createElement('div');
+                overlay.id = 'st_popup_overlay';
+                Object.assign(overlay.style, {{
+                    position: 'fixed',
+                    inset: '0',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background: 'rgba(0,0,0,0.55)',
+                    zIndex: '2147483647'
+                }});
+
+                const container = doc.createElement(useWrapper ? 'div' : 'div');
+                container.innerHTML = htmlContent;
+                overlay.appendChild(container);
+                doc.body.appendChild(overlay);
+
+                // close handlers
+                overlay.addEventListener('click', function(e) {{
+                    if (e.target === overlay) overlay.remove();
+                }}, true);
+
+                const closeBtn = doc.getElementById('st_popup_close');
+                if (closeBtn) closeBtn.addEventListener('click', function(e) {{ e.preventDefault(); overlay.remove(); }});
+
+                return true;
+            }} catch (err) {{
+                return false;
+            }}
+        }}
+
+        // 1) Try to make the iframe element fixed (so it doesn't take layout space) and render overlay inside iframe
         try {{
-            const parentDoc = parent.document;
+            if (parent && parent.frameElement) {{
+                try {{
+                    // style the iframe element in parent so it overlays the viewport and doesn't create a gap
+                    const fe = parent.frameElement;
+                    fe.style.position = 'fixed';
+                    fe.style.inset = '0';
+                    fe.style.width = '100vw';
+                    fe.style.height = '100vh';
+                    fe.style.zIndex = '2147483646';
+                    fe.style.border = 'none';
+                    fe.style.margin = '0';
+                    fe.style.padding = '0';
+                    // Now create overlay INSIDE the iframe's document (this document)
+                    // because iframe itself now covers viewport, the overlay will appear above page without layout shift
+                    const ok = createOverlayInDoc(document, false);
+                    if (ok) return;
+                }} catch (errInner) {{
+                    // if frameElement styling fails, fall through to parent.document attempt
+                }}
+            }}
+        }} catch (err) {{
+            // ignore
+        }}
 
-            // Remove any existing overlay with same id
-            const existing = parentDoc.getElementById('st_popup_overlay');
-            if (existing) existing.remove();
+        // 2) Try to inject directly into parent.document (older approach)
+        try {{
+            if (parent && parent.document) {{
+                const ok = createOverlayInDoc(parent.document, true);
+                if (ok) return;
+            }}
+        }} catch (err) {{
+            // ignore
+        }}
 
-            // Create overlay
-            const overlay = parentDoc.createElement('div');
-            overlay.id = 'st_popup_overlay';
-            Object.assign(overlay.style, {{
+        // 3) Fallback: create overlay inside this iframe (may require iframe to have visible height)
+        try {{
+            // remove existing fallback overlay
+            const old2 = document.getElementById('st_iframe_popup_overlay');
+            if (old2) old2.remove();
+
+            const overlay2 = document.createElement('div');
+            overlay2.id = 'st_iframe_popup_overlay';
+            Object.assign(overlay2.style, {{
                 position: 'fixed',
                 inset: '0',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 background: 'rgba(0,0,0,0.55)',
-                zIndex: '9999999'
+                zIndex: '2147483647'
             }});
 
-            // Create box
-            const box = parentDoc.createElement('div');
-            box.id = 'st_popup_box';
-            Object.assign(box.style, {{
-                background: 'white',
-                color: '#111',
-                padding: '20px',
-                borderRadius: '12px',
-                maxWidth: '640px',
-                width: '90%',
-                boxShadow: '0 12px 36px rgba(0,0,0,0.35)',
-                textAlign: 'center'
-            }});
+            const box2 = document.createElement('div');
+            box2.innerHTML = htmlContent;
+            overlay2.appendChild(box2);
+            document.body.appendChild(overlay2);
 
-            const titleVar = {js_title};
-            const noteVar  = {js_note};
-            const urlVar   = {js_url};
-
-            // Use JS template literal with literal ${...} - must escape braces in Python f-string as {{ and }}
-            box.innerHTML = `
-                <h3>Tür {day} — ${{titleVar}}</h3>
-                <div style="color:#333; margin-bottom:14px;">${{noteVar}}</div>
-                <div style="display:flex; gap:12px; justify-content:center; margin-top:8px;">
-                    <a href="${{urlVar}}" target="_blank" rel="noopener noreferrer"
-                       style="text-decoration:none; padding:10px 16px; border-radius:8px; background:#2b6cb0; color:white; font-weight:700;">
-                       Song öffnen
-                    </a>
-                    <button id="st_popup_close" style="padding:10px 16px; border-radius:8px; background:#eee; border:1px solid #bbb; font-weight:600;">
-                       Schließen
-                    </button>
-                </div>
-            `;
-
-            overlay.appendChild(box);
-            parentDoc.body.appendChild(overlay);
-
-            // clicking outside the box (on overlay) removes it
-            overlay.addEventListener('click', function(e) {{
-                if (e.target === overlay) {{
-                    overlay.remove();
-                }}
+            overlay2.addEventListener('click', function(e) {{
+                if (e.target === overlay2) overlay2.remove();
             }}, true);
 
-            // close button
-            const closeBtn = parentDoc.getElementById('st_popup_close');
-            if (closeBtn) {{
-                closeBtn.addEventListener('click', function(e) {{
-                    e.preventDefault();
-                    overlay.remove();
-                }});
-            }}
+            const closeBtn2 = document.getElementById('st_popup_close');
+            if (closeBtn2) closeBtn2.addEventListener('click', function(e) {{ e.preventDefault(); overlay2.remove(); }});
+            return;
         }} catch (err) {{
-            console.error('Popup injection failed', err);
-            try {{ parent.alert('Popup konnte nicht geöffnet werden.'); }} catch(e){{ }}
+            console.error('Final popup fallback failed', err);
         }}
+
     }})();
     </script>
     """
 
-    # Render with zero height -> no gap in layout
-    components.html(js, height=0, scrolling=False)
+    # Render injector with minimal height (1px) so normal cases do not produce visible gap.
+    # Because we set parent.frameElement to position:fixed, the iframe will not take layout space.
+    components.html(js, height=1, scrolling=False)
+
+    
+
+    # End of inject_popup
 
 
 # -------------------------
